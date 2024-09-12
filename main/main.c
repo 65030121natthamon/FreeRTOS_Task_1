@@ -1,68 +1,73 @@
-#include <stdio.h>
-#include <stdbool.h>
-#include <unistd.h>
-
+   #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// Handle สำหรับ task ทั้งสอง
-TaskHandle_t MyFirstTaskHandle = NULL;
-TaskHandle_t MySeconeTaskHandle = NULL;
+// กำหนดหมายเลขของ GPIO pins
+#define LED_PIN 27
+#define PUSH_BUTTON_PIN 33
 
-// Task แรก
-void My_First_Task(void * arg)
+// Handle สำหรับ task
+TaskHandle_t ISR = NULL;
+
+// Task ที่จะทำงานเมื่อ interrupt เกิดขึ้น
+void interrupt_task(void *arg)
 {
-    uint16_t i = 0;
-    while(1)
+    bool led_status = false;
+    while (1)
     {
-        printf("Hello My First Task %d\n", i);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        i++;
-
-        // ลบ task ที่สองเมื่อ i เท่ากับ 5
-        if(i == 5)
-        {
-            vTaskDelete(MySeconeTaskHandle);
-            printf("Second Task deleted\n");
-        }
-        if(i == 10)
-		{
-			vTaskResume(MySecondTaskHandle);
-			printf("Second Task Resumed\n");
-		}
-
-		if(i == 15)
-		{
-			vTaskDelete(MySecondTaskHandle);
-			printf("Second Task deleted\n");
-		}
-
-		if(i == 20)
-		{
-			printf("MyFirstTaskHandle will suspend itself\n");
-			vTaskSuspend(NULL);
-		}
+        vTaskSuspend(NULL);  // Suspend ตัวเองไว้จนกว่าจะได้รับการปลุก
+        led_status = !led_status;
+        gpio_set_level(LED_PIN, led_status);
+        printf("Button pressed!\n");
     }
 }
 
-// Task ที่สอง
-void My_Second_Task(void * arg)
+// Interrupt handler สำหรับปุ่มกด
+void IRAM_ATTR button_isr_handler(void *arg)
 {
-    uint16_t i = 0;
-    while(1)
-    {
-        printf("Hello My Second Task %d\n", i);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        i++;
-    }
+    BaseType_t high_task_awoken = pdFALSE;
+    xTaskResumeFromISR(ISR);
+    portYIELD_FROM_ISR(high_task_awoken);
 }
 
-// ฟังก์ชันหลักของโปรแกรม
 void app_main(void)
 {
-    // สร้างและรัน task แรก
-    xTaskCreate(My_First_Task, "First_Task", 4096, NULL, 10, &MyFirstTaskHandle);
+    gpio_config_t io_conf;
+    
+    // ตั้งค่า GPIO สำหรับปุ่มกด
+    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << PUSH_BUTTON_PIN);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&io_conf);
 
-    // สร้างและรัน task ที่สอง
-    xTaskCreate(My_Second_Task, "Second_Task", 4096, NULL, 10, &MySeconeTaskHandle);
+    // ตั้งค่า GPIO สำหรับ LED
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << LED_PIN);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&io_conf);
+
+    // ติดตั้ง ISR service
+    if (gpio_install_isr_service(0) != ESP_OK)
+    {
+        printf("Failed to install ISR service\n");
+        return;
+    }
+
+    // ลงทะเบียน ISR handler
+    if (gpio_isr_handler_add(PUSH_BUTTON_PIN, button_isr_handler, NULL) != ESP_OK)
+    {
+        printf("Failed to add ISR handler\n");
+        return;
+    }
+
+    // สร้างและรัน task สำหรับจัดการ interrupt
+    if (xTaskCreate(interrupt_task, "interrupt_task", 4096, NULL, 10, &ISR) != pdPASS)
+    {
+        printf("Failed to create interrupt task\n");
+        return;
+    }
 }
